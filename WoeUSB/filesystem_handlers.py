@@ -13,6 +13,7 @@ and implementations for each supported filesystem type.
 import os
 import subprocess
 import shutil
+import re
 from abc import ABC, abstractmethod
 import WoeUSB.utils as utils
 import WoeUSB.miscellaneous as miscellaneous
@@ -231,13 +232,80 @@ class ExfatFilesystemHandler(FilesystemHandler):
         
     @classmethod
     def check_dependencies(cls):
-        missing = []
+        """
+        Check for required exFAT filesystem tools and their versions
         
-        # Check for mkexfatfs or mkfs.exfat
-        if not (utils.check_command("mkexfatfs") or utils.check_command("mkfs.exfat")):
-            missing.append("exfatprogs or exfat-utils")
+        This method checks for both exfatprogs and exfat-utils packages, as different
+        distributions may provide one or the other. It also checks tool versions to
+        ensure required features are available.
+        
+        Returns:
+            tuple: (is_available, missing_dependencies)
+                is_available (bool): True if required tools are available
+                missing_dependencies (list): List of missing tools or version requirements
+        """
+        missing = []
+        version_info = {}
+        
+        # Define required tools and their minimum versions
+        REQUIRED_TOOLS = {
+            'mkexfatfs': '1.3.0',  # exfat-utils
+            'mkfs.exfat': '1.1.0',  # exfatprogs
+            'fsck.exfat': '1.1.0',  # For validation
+            'exfatlabel': '1.3.0'   # For label management
+        }
+        
+        # Check each required tool
+        found_formatter = False
+        for tool, min_version in REQUIRED_TOOLS.items():
+            if utils.check_command(tool):
+                # Get tool version
+                try:
+                    version_output = subprocess.run(
+                        [tool, '--version'],
+                        capture_output=True,
+                        text=True
+                    ).stdout
+                    
+                    # Extract version number using regex
+                    version_match = re.search(r'(\d+\.\d+\.\d+)', version_output)
+                    if version_match:
+                        version = version_match.group(1)
+                        version_info[tool] = version
+                        
+                        # Compare versions
+                        if cls._compare_versions(version, min_version) < 0:
+                            missing.append(f"{tool} (found {version}, need {min_version})")
+                        elif tool in ['mkexfatfs', 'mkfs.exfat']:
+                            found_formatter = True
+                            
+                except (subprocess.SubprocessError, OSError):
+                    missing.append(f"{tool} (version check failed)")
+            elif tool not in ['mkexfatfs', 'mkfs.exfat'] or not found_formatter:
+                # Only add formatting tools to missing if neither is found
+                missing.append(tool)
+        
+        if missing:
+            # Add distribution-specific package information
+            package_info = {
+                'Debian/Ubuntu': 'exfatprogs',
+                'Fedora': 'exfatprogs',
+                'openSUSE': 'exfatprogs',
+                'Arch Linux': 'exfatprogs',
+                'Alternative': 'exfat-utils (legacy)'
+            }
+            missing.append("\nInstall using your distribution's package manager:")
+            for distro, pkg in package_info.items():
+                missing.append(f"  {distro}: {pkg}")
             
         return (len(missing) == 0, missing)
+
+    @staticmethod
+    def _compare_versions(ver1, ver2):
+        """Compare two version strings"""
+        v1_parts = [int(x) for x in ver1.split('.')]
+        v2_parts = [int(x) for x in ver2.split('.')]
+        return (v1_parts > v2_parts) - (v1_parts < v2_parts)
 
 
 class F2fsFilesystemHandler(FilesystemHandler):
