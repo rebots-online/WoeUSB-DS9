@@ -5,9 +5,9 @@ This checklist focuses on the expedited implementation of NTFS, exFAT, and Windo
 ## Week 1: Filesystem and exFAT Support
 
 ### Day 1-2: exFAT Implementation
-- [ ] Add exFAT as filesystem option in CLI and GUI (core.py, gui.py)
-- [ ] Implement dependency checking for exFAT tools (filesystem_handlers.py)
-- [ ] Create exFAT formatting and validation functions (filesystem_handlers.py)
+- [X] Add exFAT as filesystem option in CLI and GUI (core.py, gui.py)
+- [X] Implement dependency checking for exFAT tools (filesystem_handlers.py)
+- [X] Create exFAT formatting and validation functions (filesystem_handlers.py)
 - [ ] Develop UEFI boot support for exFAT (investigate UEFI:NTFS approach, filesystem_handlers.py, core.py)
 - [ ] Test large file handling with exFAT (test scripts, manual tests)
 
