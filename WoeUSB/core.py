@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# (C)2025 Robin L. M. Cheung, MBA
 
 import os
 import time
@@ -15,6 +17,7 @@ from datetime import datetime
 import WoeUSB.utils as utils
 import WoeUSB.workaround as workaround
 import WoeUSB.miscellaneous as miscellaneous
+import WoeUSB.filesystem_handlers as fs_handlers
 
 _ = miscellaneous.i18n
 
@@ -23,8 +26,8 @@ application_version = miscellaneous.__version__
 DEFAULT_NEW_FS_LABEL = 'Windows USB'
 
 application_site_url = 'https://github.com/slacka/WoeUSB'
-application_copyright_declaration = "Copyright © Colin GILLE / congelli501 2013\\nCopyright © slacka et.al. 2017"
-application_copyright_notice = application_name + " is free software licensed under the GNU General Public License version 3(or any later version of your preference) that gives you THE 4 ESSENTIAL FREEDOMS\\nhttps://www.gnu.org/philosophy/"
+application_copyright_declaration = "Copyright © Colin GILLE / congelli501 2013\nCopyright © slacka et.al. 2017"
+application_copyright_notice = application_name + " is free software licensed under the GNU General Public License version 3(or any later version of your preference) that gives you THE 4 ESSENTIAL FREEDOMS\nhttps://www.gnu.org/philosophy/"
 
 #: Increase verboseness, provide more information when required
 verbose = False
@@ -40,7 +43,7 @@ gui = None
 
 
 def init(from_cli=True, install_mode=None, source_media=None, target_media=None, workaround_bios_boot_flag=False,
-         target_filesystem_type="FAT", filesystem_label=DEFAULT_NEW_FS_LABEL):
+          target_filesystem_type="FAT", filesystem_label=DEFAULT_NEW_FS_LABEL, skip_legacy_bootloader=False):
     """
     :param from_cli:
     :type from_cli: bool
@@ -49,6 +52,7 @@ def init(from_cli=True, install_mode=None, source_media=None, target_media=None,
     :param target_media:
     :param workaround_bios_boot_flag:
     :param target_filesystem_type:
+    :param skip_legacy_bootloader:
     :param filesystem_label:
     :return: List
     """
@@ -114,7 +118,7 @@ def init(from_cli=True, install_mode=None, source_media=None, target_media=None,
 
 
 def main(source_fs_mountpoint, target_fs_mountpoint, source_media, target_media, install_mode, temp_directory,
-         target_filesystem_type, workaround_bios_boot_flag, parser=None, skip_legacy_bootloader=False):
+          target_filesystem_type, workaround_bios_boot_flag, parser=None, skip_legacy_bootloader=False):
     """
     :param parser:
     :param source_fs_mountpoint:
@@ -125,6 +129,7 @@ def main(source_fs_mountpoint, target_fs_mountpoint, source_media, target_media,
     :param temp_directory:
     :param target_filesystem_type:
     :param workaround_bios_boot_flag:
+    :param skip_legacy_bootloader:
     :return: 0 - succes; 1 - failure
     """
     global debug
@@ -163,24 +168,79 @@ def main(source_fs_mountpoint, target_fs_mountpoint, source_media, target_media,
         utils.print_with_color(_("Error: Unable to mount source filesystem"), "red")
         return 1
 
-    if target_filesystem_type == "FAT":
-        if utils.check_fat32_filesize_limitation(source_fs_mountpoint):
-            target_filesystem_type = "NTFS"
+    # If auto-detection is requested, determine the optimal filesystem
+    if target_filesystem_type.upper() == "AUTO":
+        target_filesystem_type = fs_handlers.get_optimal_filesystem_for_iso(source_fs_mountpoint)
+        utils.print_with_color(
+            _("Info: Auto-selected {0} filesystem based on source content").format(target_filesystem_type),
+            "green"
+        )
+    
+    # Check if selected filesystem can handle the source files
+    try:
+        fs_handler = fs_handlers.get_filesystem_handler(target_filesystem_type)
+        if not fs_handler.supports_file_size_greater_than_4gb():
+            # Check if there are files larger than 4GB
+            if utils.check_fat32_filesize_limitation(source_fs_mountpoint):
+                # Try to find a better filesystem
+                available_fs = fs_handlers.get_available_filesystem_handlers()
+                alternative_fs = None
+                
+                # Prefer exFAT if available, then NTFS, then others
+                if "EXFAT" in available_fs:
+                    alternative_fs = "EXFAT"
+                elif "NTFS" in available_fs:
+                    alternative_fs = "NTFS"
+                elif "F2FS" in available_fs:
+                    alternative_fs = "F2FS"
+                elif "BTRFS" in available_fs:
+                    alternative_fs = "BTRFS"
+                
+                if alternative_fs:
+                    utils.print_with_color(
+                        _("Warning: Switching to {0} filesystem to support files larger than 4GB").format(alternative_fs),
+                        "yellow"
+                    )
+                    target_filesystem_type = alternative_fs
+                else:
+                    utils.print_with_color(
+                        _("Error: Source contains files larger than 4GB, but no suitable filesystem found to handle them."),
+                        "red"
+                    )
+                    return 1
+    except ValueError as e:
+        utils.print_with_color(str(e), "red")
+        return 1
+    
+    # Get the filesystem handler for the selected filesystem
+    try:
+        fs_handler = fs_handlers.get_filesystem_handler(target_filesystem_type)
+        is_available, missing_deps = fs_handler.check_dependencies()
+        if not is_available:
+            utils.print_with_color(
+                _("Error: Missing dependencies for {0} filesystem: {1}").format(
+                    fs_handler.name(), ", ".join(missing_deps)
+                ),
+                "red"
+            )
+            return 1
+    except ValueError as e:
+        utils.print_with_color(str(e), "red")
+        return 1
 
     if install_mode == "device":
         wipe_existing_partition_table_and_filesystem_signatures(target_device)
         create_target_partition_table(target_device, "legacy")
-        create_target_partition(target_device, target_partition, target_filesystem_type, target_filesystem_type,
-                                command_mkdosfs,
-                                command_mkntfs)
+        create_target_partition(target_device, target_partition, target_filesystem_type, filesystem_label)
 
-        if target_filesystem_type == "NTFS":
+        # Add UEFI support partition if needed
+        if fs_handler.needs_uefi_support_partition():
             create_uefi_ntfs_support_partition(target_device)
             install_uefi_ntfs_support_partition(target_device + "2", temp_directory)
 
     if install_mode == "partition":
-        utils.check_target_partition(target_partition, target_device)
-        utils.check_target_partition(target_partition, target_device)
+        if utils.check_target_partition(target_partition, target_device):
+            return 1
 
     if mount_target_filesystem(target_partition, target_fs_mountpoint):
         utils.print_with_color(_("Error: Unable to mount target filesystem"), "red")
@@ -196,7 +256,6 @@ def main(source_fs_mountpoint, target_fs_mountpoint, source_media, target_media,
     workaround.support_windows_7_uefi_boot(source_fs_mountpoint, target_fs_mountpoint)
     if not skip_legacy_bootloader:
         install_legacy_pc_bootloader_grub(target_fs_mountpoint, target_device, command_grubinstall)
-
         install_legacy_pc_bootloader_grub_config(target_fs_mountpoint, target_device, command_grubinstall, name_grub_prefix)
 
     if workaround_bios_boot_flag:
@@ -271,26 +330,22 @@ def create_target_partition_table(target_device, partition_table_type):
     return 0
 
 
-def create_target_partition(target_device, target_partition, filesystem_type, filesystem_label, command_mkdosfs,
-                            command_mkntfs):
+def create_target_partition(target_device, target_partition, filesystem_type, filesystem_label):
     """
     :param target_device:
     :param target_partition:
     :param filesystem_type:
     :param filesystem_label:
-    :param command_mkdosfs:
-    :param command_mkntfs:
-    :return: 1,2 - failure
+    :return: 1 - failure
     """
     utils.check_kill_signal()
-
-    if filesystem_type in ["FAT", "vfat"]:
-        parted_mkpart_fs_type = "fat32"
-    elif filesystem_type in ["NTFS", "ntfs"]:
-        parted_mkpart_fs_type = "ntfs"
-    else:
-        utils.print_with_color(_("Error: Filesystem not supported"), "red")
-        return 2
+    
+    try:
+        fs_handler = fs_handlers.get_filesystem_handler(filesystem_type)
+        parted_mkpart_fs_type = fs_handler.parted_fs_type()
+    except ValueError as e:
+        utils.print_with_color(str(e), "red")
+        return 1
 
     utils.print_with_color(_("Creating target partition..."), "green")
 
@@ -300,43 +355,46 @@ def create_target_partition(target_device, target_partition, filesystem_type, fi
     # http://www.gnu.org/software/grub/manual/grub.html#BIOS-installation and http://lwn.net/Articles/428584/
     # If NTFS filesystem is used we leave a 512KiB partition
     # at the end for installing UEFI:NTFS partition for NTFS support
-    if parted_mkpart_fs_type == "fat32":
-        subprocess.run(["parted",
-                        "--script",
-                        target_device,
-                        "mkpart",
-                        "primary",
-                        parted_mkpart_fs_type,
-                        "4MiB",
-                        "100%"])  # last sector of the disk
-    elif parted_mkpart_fs_type == "ntfs":
-        # Major partition for storing user files
-        # NOTE: Microsoft Windows has a bug that only recognize the first partition for removable storage devices, that's why this partition should always be the first one
-        subprocess.run(["parted",
-                        "--script",
-                        target_device,
-                        "mkpart",
-                        "primary",
-                        parted_mkpart_fs_type,
-                        "4MiB",
-                        "--",
-                        "-2049s"])  # Leave 512KiB==1024sector in traditional 512bytes/sector disk, disks with sector with more than 512bytes only result in partition size greater than 512KiB and is intentionally let-it-be.
-    # FIXME: Leave exact 512KiB in all circumstances is better, but the algorithm to do so is quite brainkilling.
-    else:
-        utils.print_with_color(_("FATAL: Illegal {0}, please report bug.").format(parted_mkpart_fs_type), "red")
+    try:
+        fs_handler = fs_handlers.get_filesystem_handler(filesystem_type)
+        if fs_handler.needs_uefi_support_partition():
+            # Leave space for UEFI support partition
+            subprocess.run(["parted",
+                            "--script",
+                            target_device,
+                            "mkpart",
+                            "primary", 
+                            parted_mkpart_fs_type,
+                            "4MiB",
+                            "--", 
+                            "-2049s"])
+        else:
+            # Use full space
+            subprocess.run(["parted",
+                            "--script",
+                            target_device,
+                            "mkpart",
+                            "primary",
+                            parted_mkpart_fs_type,
+                            "4MiB",
+                            "100%"])
+    except Exception as e:
+        utils.print_with_color(_("FATAL: {0}").format(str(e)), "red")
+        return 1
 
     utils.check_kill_signal()
-
     workaround.make_system_realize_partition_table_changed(target_device)
-
-    # Format target partition's filesystem
-    if filesystem_type in ["FAT", "vfat"]:
-        subprocess.run([command_mkdosfs, "-F", "32", target_partition])
-    elif filesystem_type in ["NTFS", "ntfs"]:
-        subprocess.run([command_mkntfs, "--quick", "--label", filesystem_label, target_partition])
-    else:
-        utils.print_with_color(_("FATAL: Shouldn't be here"), "red")
+    
+    # Format the partition with the selected filesystem
+    try:
+        fs_handler = fs_handlers.get_filesystem_handler(filesystem_type)
+        if fs_handler.format_partition(target_partition, filesystem_label) != 0:
+            return 1
+    except ValueError as e:
+        utils.print_with_color(str(e), "red")
         return 1
+        
+    return 0
 
 
 def create_uefi_ntfs_support_partition(target_device):
@@ -415,6 +473,8 @@ def mount_source_filesystem(source_media, source_fs_mountpoint):
             utils.print_with_color(_("Error: Unable to mount source media"), "red")
             return 1
 
+    return 0
+
 
 def mount_target_filesystem(target_partition, target_fs_mountpoint):
     """
@@ -439,6 +499,8 @@ def mount_target_filesystem(target_partition, target_fs_mountpoint):
                        target_fs_mountpoint]).returncode != 0:
         utils.print_with_color(_("Error: Unable to mount target media"), "red")
         return 1
+        
+    return 0
 
 
 def copy_filesystem_files(source_fs_mountpoint, target_fs_mountpoint):
@@ -526,7 +588,7 @@ def install_legacy_pc_bootloader_grub(target_fs_mountpoint, target_device, comma
 
 
 def install_legacy_pc_bootloader_grub_config(target_fs_mountpoint, target_device, command_grubinstall,
-                                             name_grub_prefix):
+                                              name_grub_prefix):
     """
     Install a GRUB config file to chainload Microsoft Windows's bootloader in Legacy PC bootmode
 
@@ -646,7 +708,8 @@ def setup_arguments():
                         help="Workaround BIOS bug that won't include the device in boot menu if non of the partition's boot flag is toggled")
     parser.add_argument("--workaround-skip-grub", action="store_true",
                         help="This will skip the legacy grub bootloader creation step.")
-    parser.add_argument("--target-filesystem", "--tgt-fs", choices=["FAT", "NTFS"], default="FAT", type=str.upper,
+    parser.add_argument("--target-filesystem", "--tgt-fs", choices=["FAT", "NTFS", "EXFAT", "F2FS", "BTRFS", "AUTO"], 
+                        default="FAT", type=str.upper,
                         help="Specify the filesystem to use as the target partition's filesystem.")
     parser.add_argument('--for-gui', action="store_true", help=argparse.SUPPRESS)
 

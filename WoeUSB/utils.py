@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# (C)2025 Robin L. M. Cheung, MBA
+
 import os
 import pathlib
 import re
@@ -22,6 +26,40 @@ except ImportError:
 
 gui = None
 verbose = False
+
+
+def check_command(command_name):
+    """
+    Check if a command is available in the system PATH
+    
+    Args:
+        command_name (str): Name of the command to check
+        
+    Returns:
+        str: Path to the command if found, None otherwise
+    """
+    return shutil.which(command_name)
+
+
+def print_with_color(text, color=""):
+    """
+    Print function
+    This function takes into account no_color flag
+    Also if used by gui, sends information to it, rather than putting it into standard output
+
+    :param text: Text to be printed
+    :param color: Color of the text
+    """
+    if gui is not None:
+        gui.state = text
+        if color == "red":
+            gui.error = text
+            sys.exit()
+    else:
+        if no_color or color == "":
+            sys.stdout.write(text + "\n")
+        else:
+            termcolor.cprint(text, color)
 
 
 def check_runtime_dependencies(application_name):
@@ -72,6 +110,40 @@ def check_runtime_dependencies(application_name):
         raise RuntimeError("Dependencies are not met")
     else:
         return [fat, ntfs, grub]
+
+
+def check_fat32_filesize_limitation(source_fs_mountpoint):
+    """
+    Check if source filesystem has files that exceed FAT32's 4GiB single file size limitation.
+    
+    :param source_fs_mountpoint: Source filesystem's mountpoint to check
+    :return: 1 if limitation is hit and an alternative filesystem is needed, 0 if FAT32 can be used
+    """
+    FAT32_MAX_SIZE = (2 ** 32) - 1  # Max fat32 file size (4GB - 1 byte)
+    
+    if verbose:
+        print_with_color(_("Checking for files larger than 4GB..."))
+    
+    for dirpath, dirnames, filenames in os.walk(source_fs_mountpoint):
+        for file in filenames:
+            path = os.path.join(dirpath, file)
+            try:
+                if os.path.getsize(path) > FAT32_MAX_SIZE:
+                    print_with_color(
+                        _(
+                            "Warning: File {0} in source image has exceed the FAT32 Filesystem 4GiB Single File Size Limitation, a different filesystem will be used.").format(
+                            path),
+                        "yellow")
+                    print_with_color(
+                        _(
+                            "Refer: https://github.com/slacka/WoeUSB/wiki/Limitations#fat32-filesystem-4gib-single-file-size-limitation for more info."),
+                        "yellow")
+                    return 1
+            except OSError:
+                # Skip files we can't access
+                continue
+                
+    return 0
 
 
 def check_runtime_parameters(install_mode, source_media, target_media):
@@ -166,28 +238,6 @@ def check_source_and_target_not_busy(install_mode, source_media, target_device, 
             return 1
 
 
-def check_fat32_filesize_limitation(source_fs_mountpoint):
-    """
-    :param source_fs_mountpoint:
-    :return:
-    """
-    for dirpath, dirnames, filenames in os.walk(source_fs_mountpoint):
-        for file in filenames:
-            path = os.path.join(dirpath, file)
-            if os.path.getsize(path) > (2 ** 32) - 1:  # Max fat32 file size
-                print_with_color(
-                    _(
-                        "Warning: File {0} in source image has exceed the FAT32 Filesystem 4GiB Single File Size Limitation, swiching to NTFS filesystem.").format(
-                        path),
-                    "yellow")
-                print_with_color(
-                    _(
-                        "Refer: https://github.com/slacka/WoeUSB/wiki/Limitations#fat32-filesystem-4gib-single-file-size-limitation for more info."),
-                    "yellow")
-                return 1
-    return 0
-
-
 def check_target_partition(target_partition, target_device):
     """
     Check target partition for potential problems before mounting them for --partition creation mode as we don't know about the existing partition
@@ -201,12 +251,14 @@ def check_target_partition(target_partition, target_device):
                                         "--noheadings",
                                         target_partition], stdout=subprocess.PIPE).stdout.decode("utf-8").strip()
 
-    if target_filesystem == "vfat":
+    if target_filesystem in ["vfat", "fat", "fat32"]:
         pass  # supported
     elif target_filesystem == "ntfs":
         check_uefi_ntfs_support_partition(target_device)
+    elif target_filesystem in ["exfat", "f2fs", "btrfs"]:
+        pass  # newly supported
     else:
-        print_with_color(_("Error: Target filesystem not supported, currently supported filesystem: FAT, NTFS."), "red")
+        print_with_color(_("Error: Target filesystem not supported, currently supported filesystems: FAT, NTFS, exFAT, F2FS, and BTRFS."), "red")
         return 1
 
     return 0
@@ -272,27 +324,6 @@ def check_target_filesystem_free_space(target_fs_mountpoint, source_fs_mountpoin
                 str(free_space),
                 str(free_space)))
         return 1
-
-
-def print_with_color(text, color=""):
-    """
-    Print function
-    This function takes into account no_color flag
-    Also if used by gui, sends information to it, rather than putting it into standard output
-
-    :param text: Text to be printed
-    :param color: Color of the text
-    """
-    if gui is not None:
-        gui.state = text
-        if color == "red":
-            gui.error = text
-            sys.exit()
-    else:
-        if no_color or color == "":
-            sys.stdout.write(text + "\n")
-        else:
-            termcolor.cprint(text, color)
 
 
 def convert_to_human_readable_format(num, suffix='B'):
