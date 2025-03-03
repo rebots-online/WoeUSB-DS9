@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# (C)2025 Robin L. M. Cheung, MBA
 
 import os
 import time
@@ -6,7 +8,6 @@ import threading
 
 import wx
 import wx.adv
-
 
 import WoeUSB.core as core
 import WoeUSB.list_devices as list_devices
@@ -24,6 +25,8 @@ class MainFrame(wx.Frame):
     __MenuBar = None
 
     __menuItemShowAll = None
+    __filesystem_choice = None
+    __fs_panel = None
 
     def __init__(self, title, pos, size, style=wx.DEFAULT_FRAME_STYLE):
         super(MainFrame, self).__init__(None, -1, title, pos, size, style)
@@ -32,8 +35,8 @@ class MainFrame(wx.Frame):
 
         file_menu = wx.Menu()
         self.__menuItemShowAll = wx.MenuItem(file_menu, wx.ID_ANY, _("Show all drives") + " \tCtrl+A",
-                                             _("Show all drives, even those not detected as USB stick."),
-                                             wx.ITEM_CHECK)
+                                          _("Show all drives, even those not detected as USB stick."),
+                                          wx.ITEM_CHECK)
         file_menu.Append(self.__menuItemShowAll)
 
         file_menu.AppendSeparator()
@@ -44,16 +47,29 @@ class MainFrame(wx.Frame):
 
         options_menu = wx.Menu()
         self.options_boot = wx.MenuItem(options_menu, wx.ID_ANY, _("Set boot flag"),
-                                        _("Sets boot flag after process of copying."),
-                                        wx.ITEM_CHECK)
-        self.options_filesystem = wx.MenuItem(options_menu, wx.ID_ANY, _("Use NTFS"),
-                                              _("Use NTFS instead of FAT. NOTE: NTFS seems to be slower than FAT."),
-                                              wx.ITEM_CHECK)
+                                     _("Sets boot flag after process of copying."),
+                                     wx.ITEM_CHECK)
         self.options_skip_grub = wx.MenuItem(options_menu, wx.ID_ANY, _("Skip legacy grub bootloader"),
-                                              _("No legacy grub bootloader will be created. NOTE: It will only boot on system with UEFI support."),
-                                              wx.ITEM_CHECK)
+                                          _("No legacy grub bootloader will be created. NOTE: It will only boot on system with UEFI support."),
+                                          wx.ITEM_CHECK)
+
+        # Create filesystem selection panel
+        self.__fs_panel = wx.Panel(self)
+        fs_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        fs_label = wx.StaticText(self.__fs_panel, label=_("Target Filesystem:"))
+        self.__filesystem_choice = wx.Choice(self.__fs_panel, choices=[
+            "FAT (Most compatible)",
+            "NTFS (Slower, supports >4GB files)",
+            "exFAT (Fast, supports >4GB files)"
+        ])
+        self.__filesystem_choice.SetSelection(0)
+        
+        fs_sizer.Add(fs_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        fs_sizer.Add(self.__filesystem_choice, 1, wx.EXPAND)
+        self.__fs_panel.SetSizer(fs_sizer)
+
         options_menu.Append(self.options_boot)
-        options_menu.Append(self.options_filesystem)
         options_menu.Append(self.options_skip_grub)
 
         self.__MenuBar = wx.MenuBar()
@@ -65,14 +81,15 @@ class MainFrame(wx.Frame):
 
         main_sizer = wx.BoxSizer(wx.VERTICAL)
 
+        # Add filesystem selection panel to the top
+        main_sizer.Add(self.__fs_panel, 0, wx.EXPAND | wx.ALL, 4)
+        
         self.__MainPanel = MainPanel(self, wx.ID_ANY)
         main_sizer.Add(self.__MainPanel, 1, wx.EXPAND | wx.ALL, 4)
 
         self.SetSizer(main_sizer)
 
-        # self.Connect(self.__menuItemShowAll.GetId(), wx.EVT_MENU, MainPanel.on_show_all_drive, None, self.__MainPanel)
         self.Bind(wx.EVT_MENU, self.__MainPanel.on_show_all_drive)
-
         self.Bind(wx.EVT_MENU, self.on_quit, exit_item)
         self.Bind(wx.EVT_MENU, self.on_about, help_item)
 
@@ -85,6 +102,17 @@ class MainFrame(wx.Frame):
 
     def is_show_all_checked(self):
         return self.__menuItemShowAll.IsChecked()
+
+    def get_selected_filesystem(self):
+        """Get the filesystem type selected by the user"""
+        selection = self.__filesystem_choice.GetSelection()
+        if selection == 0:
+            return "FAT"
+        elif selection == 1:
+            return "NTFS"
+        elif selection == 2:
+            return "EXFAT"
+        return "FAT"  # Default to FAT if something goes wrong
 
 
 class MainPanel(wx.Panel):
@@ -124,7 +152,7 @@ class MainPanel(wx.Panel):
         tmp_sizer = wx.BoxSizer(wx.HORIZONTAL)
         tmp_sizer.AddSpacer(20)
         self.__isoFile = wx.FilePickerCtrl(self, wx.ID_ANY, "", _("Please select a disk image"),
-                                           "Iso images (*.iso)|*.iso;*.ISO|All files|*")
+                                       "Iso images (*.iso)|*.iso;*.ISO|All files|*")
         tmp_sizer.Add(self.__isoFile, 1, wx.LEFT | wx.RIGHT | wx.BOTTOM, 3)
         main_sizer.Add(tmp_sizer, 0, wx.EXPAND, 0)
 
@@ -190,7 +218,6 @@ class MainPanel(wx.Panel):
             self.__usbStickList.Append(device[1])
 
         # ISO
-
         self.__dvdDriveDevList = []
         self.__dvdDriveList.Clear()
 
@@ -242,16 +269,13 @@ class MainPanel(wx.Panel):
             else:
                 iso = self.__dvdDriveDevList[self.__dvdDriveList.GetSelection()]
 
-            if self.__parent.options_filesystem.IsChecked():
-                filesystem = "NTFS"
-            else:
-                filesystem = "FAT"
-		
+            filesystem = self.__parent.get_selected_filesystem()
+
             woe = WoeUSB_handler(iso, device, boot_flag=self.__parent.options_boot.IsChecked(), filesystem=filesystem, skip_grub=self.__parent.options_skip_grub.IsChecked())
             woe.start()
 
             dialog = wx.ProgressDialog(_("Installing"), _("Please wait..."), 101, self.GetParent(),
-                                       wx.PD_APP_MODAL | wx.PD_SMOOTH | wx.PD_CAN_ABORT)
+                                   wx.PD_APP_MODAL | wx.PD_SMOOTH | wx.PD_CAN_ABORT)
 
             while woe.is_alive():
                 if not woe.progress:
@@ -262,7 +286,7 @@ class MainPanel(wx.Panel):
 
                 if not status:
                     if wx.MessageBox(_("Are you sure you want to cancel the installation?"), _("Cancel"),
-                                     wx.YES_NO | wx.ICON_QUESTION, self) == wx.NO:
+                                  wx.YES_NO | wx.ICON_QUESTION, self) == wx.NO:
                         dialog.Resume()
                     else:
                         woe.kill = True
@@ -273,8 +297,8 @@ class MainPanel(wx.Panel):
                 wx.MessageBox(_("Installation succeeded!"), _("Installation"), wx.OK | wx.ICON_INFORMATION, self)
             else:
                 wx.MessageBox(_("Installation failed!") + "\n" + str(woe.error), _("Installation"),
-                              wx.OK | wx.ICON_ERROR,
-                              self)
+                           wx.OK | wx.ICON_ERROR,
+                           self)
 
     def on_show_all_drive(self, __):
         self.refresh_list_content()
@@ -319,10 +343,10 @@ class DialogAbout(wx.Dialog):
 
         self.__NotebookAutorLicence.AddPage(
             PanelNoteBookAutors(self.__NotebookAutorLicence, wx.ID_ANY, "slacka \nLin-Buo-Ren\nWaxyMocha", data_directory + "woeusb-logo.png",
-                                "github.com/WoeUSB/WoeUSB-ng"), _("Authors"), True)
+                             "github.com/WoeUSB/WoeUSB-ng"), _("Authors"), True)
         self.__NotebookAutorLicence.AddPage(
             PanelNoteBookAutors(self.__NotebookAutorLicence, wx.ID_ANY, "Colin GILLE / Congelli501",
-                                data_directory + "c501-logo.png", "www.congelli.eu"), _("Original WinUSB Developer"), False)
+                             data_directory + "c501-logo.png", "www.congelli.eu"), _("Original WinUSB Developer"), False)
 
         licence_str = _('''
             This file is part of WoeUSB-ng.
@@ -342,7 +366,7 @@ class DialogAbout(wx.Dialog):
         ''')
 
         licence_txt = wx.TextCtrl(self.__NotebookAutorLicence, wx.ID_ANY, licence_str, wx.DefaultPosition,
-                                  wx.DefaultSize, wx.TE_MULTILINE | wx.TE_READONLY)
+                               wx.DefaultSize, wx.TE_MULTILINE | wx.TE_READONLY)
 
         self.__NotebookAutorLicence.AddPage(licence_txt, _("License"))
 
@@ -406,7 +430,7 @@ class WoeUSB_handler(threading.Thread):
         )
         try:
             core.main(source_fs_mountpoint, target_fs_mountpoint, self.source, self.target, "device", temp_directory,
-                      self.filesystem, self.boot_flag , None, self.skip_grub)
+                    self.filesystem, self.boot_flag, None, self.skip_grub)
         except SystemExit:
             pass
 
