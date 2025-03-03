@@ -214,6 +214,35 @@ class ExfatFilesystemHandler(FilesystemHandler):
     def format_partition(cls, partition, label):
         utils.check_kill_signal()
         
+        # Recommend optimal settings based on device type
+        try:
+            # Get device type (HDD, SSD, USB Flash)
+            device_base = partition.rstrip('0123456789')
+            with open(f"/sys/block/{os.path.basename(device_base)}/queue/rotational", 'r') as f:
+                is_rotational = int(f.read().strip())
+            
+            # Default options for modern SSDs and flash drives
+            format_opts = [
+                "--sector-size=4096",  # Modern default sector size
+                "--volume-label", label,
+                "--volume-serial", hex(int.from_bytes(os.urandom(4), 'big'))[2:].upper()
+            ]
+            
+            # Add device-specific optimizations
+            if not is_rotational:
+                # For SSDs and flash drives
+                format_opts.extend([
+                    "--cluster-size=128K",  # Reduce write amplification
+                    "--alignment=1M"        # Align with flash erase blocks
+                ])
+            else:
+                # For HDDs
+                format_opts.extend([
+                    "--cluster-size=32K"    # Better for general HDD use
+                ])
+        except (IOError, OSError):
+            format_opts = ["--volume-label", label]  # Fallback to basic options
+        
         utils.print_with_color(_("Creating exFAT filesystem..."), "green")
         
         # Check for mkexfatfs command
@@ -222,14 +251,44 @@ class ExfatFilesystemHandler(FilesystemHandler):
             utils.print_with_color(_("Error: mkexfatfs/mkfs.exfat command not found"), "red")
             return 1
             
-        # Format the partition as exFAT
-        cmd = [command_mkexfat, "-n", label, partition]
-        if subprocess.run(cmd).returncode != 0:
-            utils.print_with_color(_("Error: Unable to create exFAT filesystem"), "red")
+        # Format command with optimized options
+        cmd = [command_mkexfat] + format_opts + [partition]
+        
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                utils.print_with_color(_("Error: Unable to create exFAT filesystem:"), "red")
+                utils.print_with_color(result.stderr, "red")
+                return 1
+        except subprocess.SubprocessError as e:
+            utils.print_with_color(_("Error: Formatting failed: {0}").format(str(e)), "red")
+            return 1
+            
+        # Validate the newly created filesystem
+        if not cls.validate_filesystem(partition):
             return 1
             
         return 0
+    
+    @classmethod
+    def validate_filesystem(cls, partition):
+        """Validate the exFAT filesystem after creation"""
+        utils.check_kill_signal()
         
+        utils.print_with_color(_("Validating exFAT filesystem..."), "green")
+        
+        fsck_cmd = utils.check_command("fsck.exfat") or utils.check_command("exfatfsck")
+        if not fsck_cmd:
+            utils.print_with_color(_("Warning: exFAT filesystem check tools not found, skipping validation"), "yellow")
+            return True
+            
+        result = subprocess.run([fsck_cmd, "-n", partition], capture_output=True, text=True)
+        if result.returncode != 0:
+            utils.print_with_color(_("Error: Filesystem validation failed:"), "red")
+            utils.print_with_color(result.stderr, "red")
+            return False
+            
+        return 0        
     @classmethod
     def check_dependencies(cls):
         """
